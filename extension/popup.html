@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<style>
+  body { font: 13px/1.5 system-ui, "Malgun Gothic", sans-serif; width: 300px; margin: 12px; color: #202124; }
+  h1 { font-size: 14px; margin: 0 0 8px; }
+  dl { display: grid; grid-template-columns: 84px 1fr; gap: 2px 8px; margin: 0 0 10px; }
+  dt { color: #5f6368; }
+  dd { margin: 0; word-break: break-all; }
+  .warn { background: #fce8e6; color: #a50e0e; padding: 8px; border-radius: 6px; margin-bottom: 10px; }
+  .row { display: flex; gap: 6px; flex-wrap: wrap; }
+  button { font: inherit; padding: 4px 10px; border: 1px solid #dadce0; border-radius: 4px; background: #fff; cursor: pointer; }
+  button.danger { border-color: #d93025; color: #d93025; }
+  [hidden] { display: none !important; }
+</style>
+</head>
+<body>
+  <h1>북마크 실시간 동기화</h1>
+  <dl>
+    <dt>프로필 계정</dt><dd id="email">-</dd>
+    <dt>허브 연결</dt><dd id="conn">-</dd>
+    <dt>동기화</dt><dd id="sync">-</dd>
+    <dt>대기 중 변경</dt><dd id="pending">-</dd>
+    <dt>마지막 확인</dt><dd id="last">-</dd>
+    <dt>오류</dt><dd id="err">-</dd>
+  </dl>
+  <div class="warn" id="warn" hidden></div>
+  <div class="row">
+    <button id="force" class="danger" hidden>허브 기준으로 적용</button>
+    <button id="check">지금 점검</button>
+    <button id="reconnect">다시 연결</button>
+  </div>
+  <script src="popup.js"></script>
+</body>
+</html>
