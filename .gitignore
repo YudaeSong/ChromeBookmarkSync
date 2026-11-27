@@ -2,3 +2,4 @@ node_modules/
 backups/
 hub/data/
 hub/config.json
+.claude/
