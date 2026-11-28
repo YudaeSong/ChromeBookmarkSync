@@ -4,13 +4,12 @@ import fs from 'node:fs';
 import http from 'node:http';
 import path from 'node:path';
 import { WebSocketServer } from 'ws';
-import { HUB_PORT } from '../extension/shared.js';
 import { HubCore } from './core.js';
 import { Tree } from './tree.js';
 
 const dir = import.meta.dirname;
 const config = JSON.parse(fs.readFileSync(path.join(dir, 'config.json'), 'utf8'));
-const port = config.port || HUB_PORT;
+const port = config.port;
 const allowedOrigin = `chrome-extension://${config.extensionId}`;
 
 const dataDir = path.join(dir, 'data');

@@ -13,6 +13,10 @@ import { Tree } from './tree.js';
 
 export const MAX_RESPONSE_BYTES = 1_000_000; // Chrome의 호스트→확장 메시지 한도(1 MB)
 export const MAX_REQUEST_BYTES = 64 * 1024 * 1024; // 확장→호스트 한도(64 MiB)
+// 사용자가 확인한 대량 삭제(confirmRemove)의 gid 목록을 최근 몇 건까지 남긴다. 받는 프로필은 기준점 이후의
+// 확인된 삭제를 들어오는 쪽 대량 삭제 보호 판정에서 뺀다(확인한 삭제 때문에 나머지 프로필이 모두 멈추지 않게).
+// 이보다 오래 동기화하지 않은 프로필은 그 삭제를 보호에 걸린 것으로 보고 사용자가 한 번 더 확인한다.
+export const CONFIRMED_KEEP = 5;
 
 const hubDir = import.meta.dirname;
 const defaultManifest = path.join(hubDir, '..', 'extension', 'manifest.json');
@@ -93,6 +97,7 @@ async function handleInner(req, ctx) {
     const ops = req.ops || [];
     const tree = new Tree();
     tree.initFrom(shared.roots);
+    const before = req.confirmRemove === true ? new Set(tree.nodes.keys()) : null;
     const r = mergeOps(tree, ops);
     const next = { ...shared, clients: { ...(shared.clients || {}), [req.clientId]: clientEntry(req) } };
     if (r.changed) {
@@ -100,6 +105,11 @@ async function handleInner(req, ctx) {
       next.version = (Number(shared.version) || 0) + 1;
       next.updatedAt = new Date().toISOString();
       next.updatedBy = req.clientId;
+      const gone = before ? [...before].filter((g) => !tree.nodes.has(g)) : [];
+      if (gone.length) {
+        next.confirmed = [...(shared.confirmed || []), { version: next.version, gids: gone }].slice(-CONFIRMED_KEEP);
+        log(`confirmed removal from ${req.email}: ${gone.length} nodes at v${next.version}`);
+      }
     }
     await writeShared(dataDir, next, { log });
     if (ops.length || r.skipped) {
@@ -108,7 +118,12 @@ async function handleInner(req, ctx) {
     }
     const out = { version: next.version, results: { applied: r.applied, unchanged: r.unchanged, skipped: r.skipped, rescued: r.rescued } };
     // 빠른 경로: 보낸 ops가 없고 기준점이 최신이면 트리를 싣지 않는다.
-    if (ops.length || req.baseVersion !== next.version) out.roots = next.roots;
+    if (ops.length || req.baseVersion !== next.version) {
+      out.roots = next.roots;
+      const since = Number(req.baseVersion) || 0;
+      const confirmed = (next.confirmed || []).filter((e) => e.version > since);
+      if (confirmed.length) out.confirmed = confirmed;
+    }
     return out;
   }, { log });
 }

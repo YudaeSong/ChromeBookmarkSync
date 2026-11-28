@@ -3,7 +3,9 @@
 //         index가 현재 위치 또는 그 다음이면 아무것도 안 하고 이벤트도 없다.
 // - update: 실제로 바뀐 필드마다 onChanged를 한 번씩 쏜다.
 // - eventMode 'sync'면 API 응답 전에, 'deferred'면 응답 뒤(setTimeout 0, 순서 유지)에 이벤트가 온다.
-export function createFakeBookmarks({ eventMode = 'sync' } = {}) {
+// 실패 주입(테스트용): failGet — 이 ID들의 get()이 실패(루트를 찾지 못하는 프로필 흉내),
+//                    _failIds — 이 Set에 든 ID의 update·move·remove가 실패(공유 트리를 적용하지 못하는 프로필 흉내).
+export function createFakeBookmarks({ eventMode = 'sync', failGet = [] } = {}) {
   let nextId = 4;
   const nodes = new Map();
   nodes.set('0', { id: '0', title: '', children: ['1', '2', '3'] });
@@ -45,7 +47,12 @@ export function createFakeBookmarks({ eventMode = 'sync' } = {}) {
       return [t];
     },
     async getSubTree(id) { return [deep(must(id))]; },
-    async get(ids) { return (Array.isArray(ids) ? ids : [ids]).map((i) => shallow(must(i))); },
+    async get(ids) {
+      return (Array.isArray(ids) ? ids : [ids]).map((i) => {
+        if (failGet.includes(String(i))) throw new Error("Can't find bookmark for id.");
+        return shallow(must(i));
+      });
+    },
     async getChildren(id) { const n = must(id); if (!n.children) throw new Error('not folder'); return n.children.map((c) => shallow(nodes.get(c))); },
     async create({ parentId, index, title = '', url }) {
       const p = must(parentId ?? '2');
@@ -64,6 +71,7 @@ export function createFakeBookmarks({ eventMode = 'sync' } = {}) {
     async update(id, { title, url }) {
       const n = must(id);
       if (isRoot(id)) throw new Error("Can't modify the root bookmark folders.");
+      if (api._failIds.has(String(id))) throw new Error('injected failure');
       if (url != null && !n.url) throw new Error("Can't set URL of a bookmark folder.");
       if (title != null && title !== n.title) { n.title = title; fire('onChanged', n.id, { title: n.title, url: n.url }); }
       if (url != null && url !== n.url) { n.url = url; fire('onChanged', n.id, { title: n.title, url: n.url }); }
@@ -71,6 +79,7 @@ export function createFakeBookmarks({ eventMode = 'sync' } = {}) {
     },
     async move(id, { parentId, index }) {
       const n = must(id);
+      if (api._failIds.has(String(id))) throw new Error('injected failure');
       if (isRoot(id)) throw new Error("Can't modify the root bookmark folders.");
       const np = must(parentId ?? n.parentId);
       if (!np.children || np.id === '0') throw new Error("Can't modify the root bookmark folders.");
@@ -94,6 +103,7 @@ export function createFakeBookmarks({ eventMode = 'sync' } = {}) {
     },
     async removeTree(id) {
       const n = must(id);
+      if (api._failIds.has(String(id))) throw new Error('injected failure');
       if (isRoot(id)) throw new Error("Can't modify the root bookmark folders.");
       const snap = deep(n);
       const p = nodes.get(n.parentId);
@@ -111,6 +121,7 @@ export function createFakeBookmarks({ eventMode = 'sync' } = {}) {
     },
   };
   for (const n of names) api[n] = { addListener: (f) => listeners[n].push(f) };
+  api._failIds = new Set();
 
   // 비교용: 루트 3개 아래를 [title, url, children] 로
   api._dump = () => {

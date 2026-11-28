@@ -9,6 +9,7 @@
   dt { color: #5f6368; }
   dd { margin: 0; word-break: break-all; }
   .warn { background: #fce8e6; color: #a50e0e; padding: 8px; border-radius: 6px; margin-bottom: 10px; }
+  .info { background: #e8f0fe; color: #174ea6; padding: 8px; border-radius: 6px; margin-bottom: 10px; }
   .row { display: flex; gap: 6px; flex-wrap: wrap; }
   button { font: inherit; padding: 4px 10px; border: 1px solid #dadce0; border-radius: 4px; background: #fff; cursor: pointer; }
   button.danger { border-color: #d93025; color: #d93025; }
@@ -16,20 +17,21 @@
 </style>
 </head>
 <body>
-  <h1>북마크 실시간 동기화</h1>
+  <h1>북마크 동기화</h1>
   <dl>
     <dt>프로필 계정</dt><dd id="email">-</dd>
-    <dt>허브 연결</dt><dd id="conn">-</dd>
-    <dt>동기화</dt><dd id="sync">-</dd>
-    <dt>대기 중 변경</dt><dd id="pending">-</dd>
-    <dt>마지막 확인</dt><dd id="last">-</dd>
+    <dt>호스트</dt><dd id="host">-</dd>
+    <dt>동기화</dt><dd id="state">-</dd>
+    <dt>공유 버전</dt><dd id="ver">-</dd>
+    <dt>마지막 맞춤</dt><dd id="last">-</dd>
     <dt>오류</dt><dd id="err">-</dd>
   </dl>
+  <div class="info" id="rescued" hidden></div>
   <div class="warn" id="warn" hidden></div>
   <div class="row">
-    <button id="force" class="danger" hidden>허브 기준으로 적용</button>
-    <button id="check">지금 점검</button>
-    <button id="reconnect">다시 연결</button>
+    <button id="push" class="danger" hidden>다른 프로필에도 반영</button>
+    <button id="force" class="danger" hidden>공유 기준으로 적용</button>
+    <button id="syncNow">지금 맞추기</button>
   </div>
   <script src="popup.js"></script>
 </body>

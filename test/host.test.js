@@ -8,7 +8,7 @@ import path from 'node:path';
 import { test } from 'node:test';
 import { diffTrees } from '../extension/diff.js';
 import { PROTOCOL, countNodes, serializeRoots } from '../extension/shared.js';
-import { encodeFrame, handleRequest } from '../hub/host.js';
+import { CONFIRMED_KEEP, encodeFrame, handleRequest } from '../hub/host.js';
 import { mergeOps, mergeRoots } from '../hub/merge.js';
 import { readShared } from '../hub/store.js';
 import { Tree } from '../hub/tree.js';
@@ -405,4 +405,35 @@ test('무작위 편집 500회: diff → merge 왕복이 local과 정확히 같�
     assert.equal(serializeRoots(merged.roots), serializeRoots(local), `round ${round}`);
     assert.equal(merged.skipped + merged.rescued, 0, `round ${round}: 같은 기준점 위에서는 거부가 없어야 한다`);
   }
+});
+
+// ---------------- 확인된 대량 삭제 기록(S2) ----------------
+
+test('confirmRemove로 지운 gid는 shared.json에 최근 CONFIRMED_KEEP건까지 남고, 기준점 이후 것만 응답에 실린다', async () => {
+  const env = makeEnv();
+  const items = Array.from({ length: 8 }, (_, i) => bm(`n${i}`));
+  await handleRequest(req('init', { roots: R(items) }), env.ctx);
+
+  // 확인 없이 지운 것은 기록하지 않는다
+  const plain = await handleRequest(req('sync', { baseVersion: 1, ops: [{ op: 'remove', gid: 'n0' }] }), env.ctx);
+  assert.equal(plain.version, 2);
+  assert.equal('confirmed' in plain, false);
+  assert.equal(readShared(env.dataDir).confirmed, undefined);
+
+  for (let i = 1; i < 1 + CONFIRMED_KEEP + 1; i++) {
+    await handleRequest(req('sync', { baseVersion: i + 1, ops: [{ op: 'remove', gid: `n${i}` }], confirmRemove: true }), env.ctx);
+  }
+  const shared = readShared(env.dataDir);
+  assert.equal(shared.confirmed.length, CONFIRMED_KEEP);
+  assert.deepEqual(shared.confirmed.map((e) => e.gids[0]), ['n2', 'n3', 'n4', 'n5', 'n6']);
+
+  // 받는 프로필: 기준점보다 새 기록만
+  const r = await handleRequest(req('sync', { clientId: 'c-2', email: 'other@example.com', baseVersion: shared.confirmed[2].version, ops: [] }), env.ctx);
+  assert.deepEqual(r.confirmed.map((e) => e.gids[0]), ['n5', 'n6']);
+  const fast = await handleRequest(req('sync', { baseVersion: shared.version, ops: [] }), env.ctx);
+  assert.equal('confirmed' in fast, false, '빠른 경로에는 싣지 않는다');
+  // 바뀐 것이 없으면(이미 지워진 gid) 기록하지 않는다
+  await handleRequest(req('sync', { baseVersion: shared.version, ops: [{ op: 'remove', gid: 'n6' }], confirmRemove: true }), env.ctx);
+  assert.equal(readShared(env.dataDir).confirmed.length, CONFIRMED_KEEP);
+  assert.equal(readShared(env.dataDir).version, shared.version);
 });
