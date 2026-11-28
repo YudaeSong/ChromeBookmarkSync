@@ -72,7 +72,7 @@ function makeWorld({ eventMode = 'sync', seed = 1 } = {}) {
   }
 
   const shared = () => readShared(dataDir);
-  return { dataDir, profiles, addProfile, settle, syncAll, rand, shared };
+  return { dataDir, config: ctx.config, profiles, addProfile, settle, syncAll, rand, shared };
 }
 
 async function seedTree(bm, prefix, n = 3) {
@@ -564,4 +564,283 @@ test('루트를 찾지 못한 프로필(모바일): 그 루트는 지우지도 �
   assert.equal(st.mismatch, 0);
   assert.equal(st.stuck, false);
   assert.equal(st.synced, true);
+});
+
+// ---------------- S3b: 받는 쪽 이동의 로컬 ID 보존(reconcile 배치→정리 2단계) ----------------
+
+// 받는 쪽의 bm.create·removeTree 호출 수를 센다(remove도 removeTree를 거친다).
+function countCalls(bm) {
+  const c = { create: 0, removeTree: 0 };
+  for (const k of Object.keys(c)) {
+    const f = bm[k];
+    bm[k] = async (...a) => { c[k]++; return f(...a); };
+  }
+  return c;
+}
+
+// 제목 → 로컬 ID (테스트 트리의 제목은 모두 다르다)
+async function idsByTitle(bm) {
+  const out = new Map();
+  for (const id of bm._all()) out.set((await bm.get(id))[0].title, id);
+  return out;
+}
+
+async function idOf(bm, title) {
+  return (await idsByTitle(bm)).get(title);
+}
+
+// m에서 doMove로 옮기고 a가 맞춘 뒤, a의 로컬 ID·대응표가 그대로이고 새로 만들거나 지우지 않았는지 확인한다.
+async function expectMovePreserved(w, m, a, doMove, msg) {
+  const before = await idsByTitle(a.bm);
+  const mapBefore = structuredClone(a.mem.map);
+  const c = countCalls(a.bm);
+  await doMove();
+  await w.settle();
+  await a.engine.sync();
+  await w.settle();
+  assertAllEqual(w, msg);
+  assert.deepEqual(await idsByTitle(a.bm), before, `${msg}: 받는 쪽 로컬 ID가 바뀜`);
+  assert.deepEqual(a.mem.map, mapBefore, `${msg}: 대응표가 바뀜`);
+  assert.deepEqual(c, { create: 0, removeTree: 0 }, `${msg}: 옮기지 않고 새로 만들거나 지움`);
+}
+
+test('이동 ID 보존: 루트 사이 이동(북마크바→기타, 기타→모바일, 기타→북마크바)', async () => {
+  const w = makeWorld();
+  const m = w.addProfile(MASTER);
+  const a = w.addProfile('a@x');
+  await seedTree(m.bm, 'M');
+  await startAll(w);
+  await expectMovePreserved(w, m, a, async () => m.bm.move(await idOf(m.bm, 'M-bar0'), { parentId: '2', index: 0 }), '북마크바→기타');
+  await expectMovePreserved(w, m, a, async () => m.bm.move(await idOf(m.bm, 'M-other'), { parentId: '3' }), '기타→모바일');
+  await expectMovePreserved(w, m, a, async () => m.bm.move(await idOf(m.bm, 'M-bar0'), { parentId: '1', index: 1 }), '기타→북마크바');
+});
+
+test('이동 ID 보존: 같은 루트 안 폴더 사이 이동(앞→뒤, 뒤→앞, 루트→하위, 하위→루트)', async () => {
+  const w = makeWorld();
+  const m = w.addProfile(MASTER);
+  const a = w.addProfile('a@x');
+  await seedTree(m.bm, 'M');
+  await m.bm.create({ parentId: '1', title: 'M-뒤폴더' });
+  await startAll(w);
+  const fA = () => idOf(m.bm, 'M-폴더A');
+  const fB = () => idOf(m.bm, 'M-뒤폴더');
+  await expectMovePreserved(w, m, a, async () => m.bm.move(await idOf(m.bm, 'M-a0'), { parentId: await fB() }), '앞 폴더→뒤 폴더');
+  await expectMovePreserved(w, m, a, async () => m.bm.move(await idOf(m.bm, 'M-a0'), { parentId: await fA(), index: 0 }), '뒤 폴더→앞 폴더');
+  await expectMovePreserved(w, m, a, async () => m.bm.move(await idOf(m.bm, 'M-bar1'), { parentId: await fA() }), '루트→하위 폴더');
+  await expectMovePreserved(w, m, a, async () => m.bm.move(await idOf(m.bm, 'M-deep'), { parentId: '1' }), '하위 폴더→루트');
+});
+
+test('이동 ID 보존: 하위가 있는 폴더를 옮기면 폴더와 모든 후손의 ID·gid가 그대로다', async () => {
+  const w = makeWorld();
+  const m = w.addProfile(MASTER);
+  const a = w.addProfile('a@x');
+  await seedTree(m.bm, 'M');
+  await startAll(w);
+  await expectMovePreserved(w, m, a, async () => m.bm.move(await idOf(m.bm, 'M-폴더A'), { parentId: '2' }), '폴더 이동');
+});
+
+test('이동 ID 보존: 폴더에서 X를 꺼내 기타로 옮기고 그 폴더를 지우면 X는 보존되고 나머지는 지워진다', async () => {
+  const w = makeWorld();
+  const m = w.addProfile(MASTER);
+  const a = w.addProfile('a@x');
+  await seedTree(m.bm, 'M');
+  await startAll(w);
+  const before = await idsByTitle(a.bm);
+  const gidOf = (title) => Object.keys(a.mem.map).find((g) => a.mem.map[g] === before.get(title));
+  const gone = ['M-폴더A', 'M-a1', 'M-a2', 'M-하위', 'M-deep'].map(gidOf);
+  assert.ok(gone.every(Boolean));
+
+  await m.bm.move(await idOf(m.bm, 'M-a0'), { parentId: '2' });
+  await m.bm.removeTree(await idOf(m.bm, 'M-폴더A'));
+  await w.settle();
+  await a.engine.sync();
+  await w.settle();
+  assertAllEqual(w);
+  assert.equal(await idOf(a.bm, 'M-a0'), before.get('M-a0'), 'X가 다시 만들어짐');
+  for (const g of gone) assert.equal(a.mem.map[g], undefined, `지운 노드의 gid ${g}가 대응표에 남음`);
+  assert.equal(a.engine.debugState().mismatch, 0);
+});
+
+test('이동 ID 보존: 33개짜리 폴더를 옮겨도 양쪽 모두 대량 삭제 보호에 걸리지 않고 새로 만들지 않는다', async () => {
+  const w = makeWorld();
+  const m = w.addProfile(MASTER);
+  const a = w.addProfile('a@x');
+  await seedTree(m.bm, 'M', 30);
+  await startAll(w);
+  await expectMovePreserved(w, m, a, async () => m.bm.move(await idOf(m.bm, 'M-폴더A'), { parentId: '2' }), '큰 폴더 이동');
+  assert.equal(m.engine.debugState().blocked, null);
+  assert.equal(a.engine.debugState().blocked, null);
+});
+
+test('이동 ID 보존: 받는 쪽이 옮기지 못하면 공유 트리를 되돌리지 않고, 풀리면 같은 ID로 맞춰진다', async () => {
+  const w = makeWorld();
+  const m = w.addProfile(MASTER);
+  const a = w.addProfile('a@x');
+  await seedTree(m.bm, 'M');
+  await startAll(w);
+  const ax = await idOf(a.bm, 'M-bar0');
+  a.bm._failIds.add(ax);
+
+  await m.bm.move(await idOf(m.bm, 'M-bar0'), { parentId: '2', index: 0 });
+  await w.settle();
+  await a.engine.sync();
+  await a.engine.sync();
+  await w.settle();
+  assert.ok(a.engine.debugState().mismatch > 0);
+  assert.equal(w.shared().roots.root_other[0].title, 'M-bar0', '옮기지 못한 프로필이 공유 트리를 되돌림');
+  assert.ok(!w.shared().roots.root_bar.some((n) => n.title === 'M-bar0'));
+
+  a.bm._failIds.clear();
+  await a.engine.sync();
+  await w.settle();
+  assert.equal(a.engine.debugState().mismatch, 0);
+  assert.equal(await idOf(a.bm, 'M-bar0'), ax, '풀린 뒤 새로 만들어짐');
+  assertAllEqual(w);
+});
+
+test('이동: 모바일 루트를 찾지 못한 프로필은 메인이 북마크바→모바일로 옮긴 노드를 북마크바에서 지우고 맞춰진 상태다', async () => {
+  const w = makeWorld();
+  const m = w.addProfile(MASTER);
+  const a = w.addProfile('a@x', { failGet: ['3'] });
+  await seedTree(m.bm, 'M');
+  await w.settle();
+  await m.engine.sync();
+  await a.engine.sync();
+  await w.settle();
+
+  await m.bm.move(await idOf(m.bm, 'M-bar0'), { parentId: '3' });
+  await w.settle();
+  await a.engine.sync();
+  await w.settle();
+  assert.equal(await idOf(a.bm, 'M-bar0'), undefined);
+  assert.ok(w.shared().roots.root_mobile.some((n) => n.title === 'M-bar0'), '공유 트리의 모바일 노드가 지워짐');
+  const st = a.engine.debugState();
+  assert.equal(st.mismatch, 0);
+  assert.equal(st.stuck, false);
+});
+
+// ---------------- S3b: 예외 프로필(config.excludeEmails) ----------------
+
+// 메인 m과 a를 맞춘 뒤 a를 예외 목록에 넣는다(a는 아직 모른다).
+async function excludeWorld(n = 3) {
+  const w = makeWorld();
+  const m = w.addProfile(MASTER);
+  const a = w.addProfile('a@x');
+  await seedTree(m.bm, 'M', n);
+  await startAll(w);
+  w.config.excludeEmails = ['A@X'];
+  return { w, m, a };
+}
+
+function assertExcludedState(a) {
+  const st = a.engine.debugState();
+  assert.equal(st.excluded, true);
+  assert.equal(st.blocked, null);
+  assert.equal(st.hasBase, false);
+  assert.equal(a.mem.base, null);
+  assert.equal(a.mem.baseVersion, null);
+  assert.equal(a.mem.initialized, false);
+  assert.equal(a.mem.blocked, null);
+  assert.equal(a.mem.mismatch, null);
+  assert.deepEqual(a.mem.pending, []);
+  assert.ok(Object.keys(a.mem.map).length > 3, '대응표는 남긴다');
+  assert.ok(a.mem.clientId);
+}
+
+test('예외 (a): 다른 프로필이 고치고 맞춰도 예외 프로필의 북마크는 그대로다', async () => {
+  const { w, m, a } = await excludeWorld();
+  await a.engine.sync();
+  assertExcludedState(a);
+  const before = JSON.stringify(a.bm._dump());
+  await m.bm.update(await idOf(m.bm, 'M-bar0'), { title: '메인이바꿈' });
+  await m.bm.create({ parentId: '2', title: '메인추가', url: 'https://m.example/add' });
+  await w.settle();
+  await w.syncAll();
+  await a.engine.sync({ trigger: 'alarm' });
+  await w.settle();
+  assert.equal(JSON.stringify(a.bm._dump()), before);
+  assert.ok(titles(w).includes('메인이바꿈'));
+  assert.equal(w.shared().clients[a.mem.clientId].version, '2.0.0', 'clients 항목은 예외 전 것 그대로');
+});
+
+test('예외 (b)(c): 예외 프로필에서 고친 것은 올라가지 않고, 예외가 된 뒤의 북마크 이벤트는 호스트를 부르지 않는다', async () => {
+  const { w, a } = await excludeWorld();
+  const v0 = w.shared().version;
+  // a는 아직 기준점이 있어 첫 편집은 ops로 나가지만 호스트가 버린다
+  await a.bm.update(await idOf(a.bm, 'M-bar1'), { title: 'A가바꿈' });
+  await w.settle();
+  assertExcludedState(a);
+  assert.equal(w.shared().version, v0);
+  assert.ok(!titles(w).includes('A가바꿈'));
+
+  const calls = a.calls;
+  await a.bm.create({ parentId: '1', title: '예외추가', url: 'https://ex.example/' });
+  await a.bm.removeTree(await idOf(a.bm, 'M-bar2'));
+  await a.bm.move(await idOf(a.bm, 'M-other'), { parentId: '1', index: 0 });
+  await w.settle();
+  assert.equal(a.calls, calls, '예외 프로필의 북마크 이벤트가 호스트를 부름');
+  assert.equal(w.shared().version, v0);
+});
+
+test('예외 (d): 목록에서 빼면 공유로 덮어쓰고, 예외 기간의 삭제는 퍼지지 않으며, 같은 노드는 로컬 ID가 그대로다', async () => {
+  const { w, m, a } = await excludeWorld();
+  await a.engine.sync();
+  const before = await idsByTitle(a.bm);
+  await a.bm.removeTree(await idOf(a.bm, 'M-bar1'));
+  await a.bm.update(await idOf(a.bm, 'M-bar0'), { title: '예외중이름' });
+  await a.bm.create({ parentId: '2', title: '예외중추가', url: 'https://ex.example/add' });
+  await m.bm.create({ parentId: '1', title: '메인추가', url: 'https://m.example/add' });
+  await w.settle();
+
+  w.config.excludeEmails = [];
+  await a.engine.sync({ trigger: 'focus' });
+  await w.settle();
+  assert.equal(a.engine.debugState().excluded, false);
+  await w.syncAll();
+  assertAllEqual(w);
+  const t = titles(w);
+  assert.ok(t.includes('M-bar1') && t.includes('"M-bar0"') && t.includes('메인추가'));
+  assert.ok(!t.includes('예외중이름') && !t.includes('예외중추가'));
+  for (const [title, id] of before) {
+    if (title !== 'M-bar1') assert.equal(await idOf(a.bm, title), id, `${title}의 로컬 ID가 바뀜`);
+  }
+  assert.equal(a.engine.debugState().initialized, true);
+  assert.ok(a.mem.base);
+});
+
+test('예외 (e): 복귀할 때 예외 기간에 만든 것이 많아도 대량 삭제 보호에 걸리지 않고 공유로 덮어쓴다', async () => {
+  const { w, a } = await excludeWorld();
+  await a.engine.sync();
+  for (let i = 0; i < 25; i++) await a.bm.create({ parentId: '2', title: `예외${i}`, url: `https://ex.example/${i}` });
+  await w.settle();
+  w.config.excludeEmails = [];
+  await a.engine.sync();
+  await w.settle();
+  assert.equal(a.engine.debugState().blocked, null);
+  assertAllEqual(w);
+});
+
+test('예외 (f): v1 저장소(map + pending, 기준점 없음)가 예외를 받으면 pending을 올리지 않고 지운다', async () => {
+  const { w, a } = await excludeWorld();
+  a.engine.stop();
+  const pn = await a.bm.create({ parentId: '2', title: 'v1대기', url: 'https://v1.example/pending' });
+  for (const k of ['base', 'baseVersion', 'mismatch', 'blocked']) delete a.mem[k];
+  a.mem.map.gv1 = pn.id;
+  a.mem.pending = [{ op: 'create', gid: 'gv1', parent: 'root_other', index: pn.index, title: 'v1대기', url: 'https://v1.example/pending' }];
+  const before = JSON.stringify(a.bm._dump());
+  a.start();
+  await a.engine.sync({ trigger: 'startup' });
+  await w.settle();
+  assertExcludedState(a);
+  assert.ok(!titles(w).includes('v1대기'), 'pending이 올라감');
+  assert.equal(JSON.stringify(a.bm._dump()), before);
+});
+
+test('예외 (g): 기준점이 남은 채 큰 폴더를 지워 나가는 쪽 보호에 걸려도, 호스트가 예외로 답하면 멈추지 않고 예외가 된다', async () => {
+  const { w, a } = await excludeWorld(30);
+  const total = countNodes(w.shared().roots);
+  await a.bm.removeTree(await idOf(a.bm, 'M-폴더A'));
+  await w.settle();
+  assertExcludedState(a);
+  assert.equal(countNodes(w.shared().roots), total);
 });

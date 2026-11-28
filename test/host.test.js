@@ -7,7 +7,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { test } from 'node:test';
 import { diffTrees } from '../extension/diff.js';
-import { PROTOCOL, countNodes, serializeRoots } from '../extension/shared.js';
+import { CODE_VERSION, PROTOCOL, countNodes, serializeRoots } from '../extension/shared.js';
 import { CONFIRMED_KEEP, encodeFrame, handleRequest } from '../hub/host.js';
 import { mergeOps, mergeRoots } from '../hub/merge.js';
 import { readShared } from '../hub/store.js';
@@ -436,4 +436,51 @@ test('confirmRemove로 지운 gid는 shared.json에 최근 CONFIRMED_KEEP건까�
   await handleRequest(req('sync', { baseVersion: shared.version, ops: [{ op: 'remove', gid: 'n6' }], confirmRemove: true }), env.ctx);
   assert.equal(readShared(env.dataDir).confirmed.length, CONFIRMED_KEEP);
   assert.equal(readShared(env.dataDir).version, shared.version);
+});
+
+// ---------------- S3b: 예외 프로필(config.excludeEmails) ----------------
+
+test('excludeEmails의 계정(대소문자·공백 차이 포함)이면 {excluded:true}이고 shared.json의 version·clients를 바꾸지 않는다', async () => {
+  const env = makeEnv();
+  env.config.excludeEmails = ['  Sub@Example.com '];
+  await handleRequest(req('init', { roots: R([bm('a')]) }), env.ctx);
+  const before = readShared(env.dataDir);
+  const sub = { clientId: 'c-sub', email: 'sub@example.COM' };
+  for (const r of [req('sync', { ...sub, ops: [{ op: 'remove', gid: 'a' }] }), req('init', { ...sub, roots: R() })]) {
+    const { diskVersion, ...res } = await handleRequest(r, env.ctx);
+    assert.deepEqual(res, { excluded: true });
+  }
+  assert.deepEqual(readShared(env.dataDir), before);
+});
+
+test('빈 email은 excludeEmails의 빈 항목과도 일치시키지 않는다', async () => {
+  const env = makeEnv();
+  env.config.excludeEmails = ['', '  '];
+  await handleRequest(req('init', { roots: R([bm('a')]) }), env.ctx);
+  const res = await handleRequest(req('sync', { clientId: 'c-anon', email: '', baseVersion: null }), env.ctx);
+  assert.equal(res.excluded, undefined);
+  assert.equal(res.version, 1);
+  assert.ok(readShared(env.dataDir).clients['c-anon']);
+});
+
+test('masterEmail이 excludeEmails에 있어도 메인은 정상 처리한다', async () => {
+  const env = makeEnv();
+  env.config.excludeEmails = [MASTER.toUpperCase()];
+  const logs = [];
+  const ctx = { ...env.ctx, log: (m) => logs.push(m) };
+  assert.equal((await handleRequest(req('sync'), ctx)).need, 'init');
+  assert.equal((await handleRequest(req('init', { roots: R([bm('a')]) }), ctx)).version, 1);
+  assert.ok(logs.includes('config: masterEmail is in excludeEmails, ignored'));
+});
+
+test('예외 계정도 protocol이 다르면 protocol 오류가 먼저다(옛 코드 감지 유지)', async () => {
+  const env = makeEnv();
+  env.config.excludeEmails = ['sub@example.com'];
+  const { diskVersion, ...res } = await handleRequest(req('sync', { email: 'sub@example.com', protocol: PROTOCOL - 1 }), env.ctx);
+  assert.deepEqual(res, { error: 'protocol', want: PROTOCOL });
+});
+
+test('코드 버전 CODE_VERSION은 manifest.json의 version과 같다(다시 읽기 판단에 쓴다)', () => {
+  const manifest = JSON.parse(fs.readFileSync(path.join(import.meta.dirname, '..', 'extension', 'manifest.json'), 'utf8'));
+  assert.equal(CODE_VERSION, manifest.version);
 });

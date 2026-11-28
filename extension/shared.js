@@ -8,6 +8,10 @@ export const HOST_NAME = 'com.chromebookmarksync.host';
 // (Chrome은 디스크의 확장 코드를 고쳐도 새로고침 전까지 옛 서비스 워커를 계속 돌린다.)
 // 1(번호 없음): check에 skip 없음 / 2: hello에 protocol·version, 허브의 'stuck' 메시지 / 3: Native Messaging sync 요청
 export const PROTOCOL = 3;
+// 이 코드의 버전. manifest.json의 version과 항상 같게 올린다(테스트가 확인한다).
+// 다시 읽기 판단은 manifest가 아니라 이 값으로 한다. Chrome은 닫혀 있던 프로필을 열 때 manifest는 디스크에서 새로 읽고
+// 서비스 워커는 옛 캐시 코드로 띄우는데, 그때 getManifest().version은 이미 새 버전이라 diskVersion과 비교해도 옛 코드임을 알 수 없다.
+export const CODE_VERSION = '2.0.2';
 
 // 트리 형식: { root_bar: [노드…], root_other: […], root_mobile: […] }
 // 노드: 폴더 { gid, title, children: [...] } / 북마크 { gid, title, url }

@@ -1,9 +1,10 @@
 // 서비스 워커: 북마크 이벤트·창 포커스·5분 알람·시작을 엔진(core.js)에 연결하고, 네이티브 호스트(hub/host.js)를 부른다.
 // 오래 유지하는 연결이 없다. 맞출 때마다 sendNativeMessage가 호스트를 띄우고, 응답을 받으면 호스트는 끝난다.
 import { createEngine, newerVersion } from './core.js';
-import { HOST_NAME } from './shared.js';
+import { CODE_VERSION, HOST_NAME } from './shared.js';
 
-const VERSION = chrome.runtime.getManifest().version;
+// manifest가 아니라 코드에 박힌 버전을 쓴다(shared.js CODE_VERSION 주석 참고). 호스트 보고·팝업에도 실제로 도는 코드의 버전이 보인다.
+const VERSION = CODE_VERSION;
 const FOCUS_DELAY_MS = 300; // 호스트 1회 호출 중앙값 130 ms(S1 실측)보다 넉넉하게
 const FOCUS_SKIP_MS = 2000; // 마지막으로 맞춘 지 이만큼 안 됐으면(같은 프로필의 창끼리 전환) 건너뛴다
 
@@ -12,7 +13,9 @@ const emailReady = chrome.identity.getProfileUserInfo({ accountStatus: 'ANY' })
   .then((u) => { email = u?.email || ''; }, () => { email = ''; });
 
 function badge(s) {
-  const [text, color] = (s.blocked || s.protocolError) ? ['!', '#d93025']
+  const [text, color] = s.protocolError ? ['!', '#d93025']
+    : s.excluded ? ['EX', '#9aa0a6'] // 동기화 예외(hub/config.json의 excludeEmails)
+    : s.blocked ? ['!', '#d93025']
     : s.hostOk === false ? ['OFF', '#80868b']
       : s.stuck ? ['?', '#e8710a']
         : (s.waiting || !s.synced) ? ['…', '#f9ab00']

@@ -73,6 +73,7 @@ export function createEngine({
   let synced = false;
   let waiting = false;
   let protocolError = null;
+  let excluded = false; // 호스트가 이 프로필을 동기화 예외(config.excludeEmails)로 답했다. 저장하지 않고 응답마다 다시 정한다.
   let importing = false;
   let lastSync = 0;
   let lastError = '';
@@ -119,7 +120,7 @@ export function createEngine({
 
   function status() {
     onStatus({
-      hostOk, synced, waiting, stuck: isStuck(), protocolError,
+      hostOk, synced, waiting, stuck: isStuck(), protocolError, excluded,
       blocked: blocked ? { ...blocked } : null,
       baseVersion, mapped: rev.size, lastSync, lastError, rescued,
     });
@@ -253,7 +254,10 @@ export function createEngine({
     if (t) unbindTree(t);
   }
 
-  async function syncFolder(kids, folderId) {
+  // 1단계(배치): 공유 순서대로 놓기만 하고, 남는 노드는 지우지 않고 (폴더, 남는 위치)를 plan에 전위 순서로 쌓는다.
+  // 남는 노드를 폴더마다 바로 지우면, 아직 차례가 오지 않은 다른 폴더로 옮겨질 노드가 옛 부모에서 지워져
+  // 대응표까지 풀리고 새 부모 차례에 새로 만들어진다(로컬 ID가 바뀌고, 폴더면 하위까지 전부). 그래서 정리는 2단계로 미룬다.
+  async function syncFolder(kids, folderId, plan) {
     let pos = 0;
     for (const c of kids) {
       const isFolder = c.url == null;
@@ -275,11 +279,20 @@ export function createEngine({
         log('reconcile item failed', c.gid, c.title, e?.message);
       }
     }
-    const nowKids = modifiableKids({ children: await bm.getChildren(folderId) });
-    for (const n of nowKids.slice(pos)) {
-      try { await removeLocal(n.id); } catch (e) { failures++; log('reconcile remove failed', n.id, e?.message); }
+    plan.push([folderId, pos]);
+    for (const c of kids) if (c.url == null && map[c.gid]) await syncFolder(c.children || [], map[c.gid], plan);
+  }
+
+  // 2단계(정리): 모든 루트의 배치가 끝난 뒤 plan 순서대로 각 폴더의 pos 뒤에 남은 노드를 지운다.
+  // 앞 항목에서 폴더가 이미 지워졌으면 getChildren이 실패하므로 그 항목만 건너뛴다.
+  async function sweepExtras(plan) {
+    for (const [folderId, pos] of plan) {
+      let kidsNow;
+      try { kidsNow = await bm.getChildren(folderId); } catch { continue; }
+      for (const n of modifiableKids({ children: kidsNow }).slice(pos)) {
+        try { await removeLocal(n.id); } catch (e) { failures++; log('reconcile remove failed', n.id, e?.message); }
+      }
     }
-    for (const c of kids) if (c.url == null && map[c.gid]) await syncFolder(c.children || [], map[c.gid]);
   }
 
   // 공유 트리(roots)로 내 트리를 정확히 맞춘다. 들어오는 대량 삭제 보호에 걸리면 아무것도 바꾸지 않고 { ok:false, info }.
@@ -305,7 +318,9 @@ export function createEngine({
       return { ok: false, info };
     }
     failures = 0;
-    for (const g of ROOT_GIDS) if (rootIds[g]) await syncFolder(roots[g] || [], rootIds[g]);
+    const plan = [];
+    for (const g of ROOT_GIDS) if (rootIds[g]) await syncFolder(roots[g] || [], rootIds[g], plan);
+    await sweepExtras(plan);
     return { ok: true, failed: failures };
   }
 
@@ -348,7 +363,23 @@ export function createEngine({
     }
     hostOk = true;
     lastError = '';
+    excluded = res.excluded === true;
     return res;
+  }
+
+  // 예외 프로필이 됐다: 북마크는 그대로 두고 기준점·v1 pending을 버린다(map·clientId는 복귀할 때 노드를 다시 쓰려고 남긴다).
+  // 기준점을 남겨 두면 복귀할 때 예외 기간의 삭제가 「내 변경」으로 잡혀 모든 프로필에서 지워질 수 있다.
+  // 복귀하면 base가 없고 initialized:false이므로 새 프로필처럼 공유 트리로 덮어쓴다(들어오는 대량 삭제 보호도 그 첫 맞춤에서는 꺼진다).
+  async function enterExcluded() {
+    base = null;
+    baseVersion = null;
+    initialized = false;
+    pending = [];
+    blocked = null;
+    mismatch = null;
+    synced = false;
+    waiting = false;
+    await saveState({ pending: [] });
   }
 
   // ---------- sync (설계 §4.2) ----------
@@ -386,7 +417,9 @@ export function createEngine({
           synced = false;
           log('mass-delete guard (out)', blocked);
           await saveState();
-          await callHost(await request('sync', { baseVersion, ops: [] })); // 호스트 상태에 blocked를 남긴다(트리는 쓰지 않음)
+          // 호스트 상태에 blocked를 남긴다(트리는 쓰지 않음). 예외 프로필이면 멈추지 않고 예외로 둔다.
+          const r0 = await callHost(await request('sync', { baseVersion, ops: [] }));
+          if (r0?.excluded) await enterExcluded();
           return;
         }
       }
@@ -397,12 +430,14 @@ export function createEngine({
         baseVersion: wantRoots ? null : baseVersion, ops, ...(opts.allowOut ? { confirmRemove: true } : {}),
       }));
       if (!res) return;
+      if (res.excluded) { await enterExcluded(); return; } // 보낸 ops는 호스트가 버렸다
       if (res.need === 'wait') { waiting = true; synced = false; return; }
       waiting = false;
       if (res.need === 'init') {
         // 메인 프로필이고 공유 트리가 아직 없다: 내 트리로 만든다.
         res = await callHost(await request('init', { roots: local.roots }));
         if (!res) return;
+        if (res.excluded) { await enterExcluded(); return; }
         if (res.need === 'wait') { waiting = true; synced = false; return; }
         if (!res.roots) { lastError = 'init 응답에 트리가 없음'; return; }
         if ((await hashRoots(res.roots)) === (await hashRoots(local.roots))) {
@@ -519,7 +554,7 @@ export function createEngine({
     lastSuccess: () => lastSync,
     localRoots: async () => { let out; await enqueue(async () => { out = (await readLocal()).roots; }); return out; },
     debugState: () => ({
-      hostOk, synced, waiting, stuck: isStuck(), blocked: blocked?.dir ?? null, protocolError: !!protocolError,
+      hostOk, synced, waiting, stuck: isStuck(), blocked: blocked?.dir ?? null, protocolError: !!protocolError, excluded,
       initialized, mapped: rev.size, baseVersion, mismatch: mismatch?.count ?? 0, rescued: rescued?.count ?? 0,
       pending: pending.length, hasBase: !!base, localEpoch,
     }),

@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "북마크 실시간 동기화",
-  "version": "2.0.0",
+  "version": "2.0.2",
   "description": "이 PC의 모든 Chrome 프로필 북마크를 공유 파일을 통해 맞춥니다(창을 전환할 때 반영).",
   "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAqEhgT+zdIV0jUbnMzojKxbw4+rMK7Qbg/xhAIjbn6WjIWa87fPx0s3stEKifgj5J4pd0k+Pg+xLtUrIDWwW59KK3je0uML7bnsCBGa8seYlWbDyjA1bGOfi7pwlmqmjO8/yAJAvS7fRkoRpFYOZ8muXd1DX7vI3T6Pa1XURLfou8/5qP86Sq7+AfpYBXJc2KMyTKoeTEeoZTcQRVoFS1DgEhIgUzwIvSq1S48xZVSacXTcpU7OpXRJOdME51Oqatbqkp4JfcCKp80n+Hhan8vi3C3H37tis6r+3kiIvxBInpPHCbSHjLbxNM9Boa24qJuuX26NaB4d5eN4wZ4qMdEQIDAQAB",
   "permissions": ["bookmarks", "nativeMessaging", "storage", "unlimitedStorage", "alarms", "identity", "identity.email"],

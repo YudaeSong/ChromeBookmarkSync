@@ -7,6 +7,7 @@ function render(s = {}) {
   $('email').textContent = s.email || '(로그인 안 됨)';
   $('host').textContent = s.hostOk == null ? '-' : s.hostOk ? '정상' : '호출 실패 — 호스트 등록(scripts/install-host.ps1) 확인';
   $('state').textContent = s.protocolError ? `확장 새로고침 필요(호스트 규약 ${s.protocolError.want}, 이 확장 ${s.protocolError.have})`
+    : s.excluded ? '동기화 예외'
     : s.blocked ? '멈춤(확인 필요)'
       : s.stuck ? '공유 트리와 계속 어긋남(오류 참고)'
         : s.waiting ? '메인 프로필의 첫 동기화를 기다리는 중'
@@ -18,10 +19,12 @@ function render(s = {}) {
   $('rescued').hidden = !s.rescued;
   if (s.rescued) $('rescued').textContent = `다른 프로필이 지운 폴더에 있던 새 북마크 ${s.rescued.count}개를 기타 북마크로 옮겼습니다(${time(s.rescued.at)}).`;
 
-  const b = s.blocked;
+  $('excluded').hidden = !s.excluded;
+
+  const b = s.excluded ? null : s.blocked; // 예외면 「공유 기준으로 적용」·「다른 프로필에도 반영」을 숨긴다(「지금 맞추기」는 남김)
   $('warn').hidden = !b;
   $('push').hidden = b?.dir !== 'out';
-  $('force').hidden = !b && !s.stuck;
+  $('force').hidden = s.excluded || (!b && !s.stuck);
   $('force').textContent = b?.dir === 'out' ? '공유 기준으로 되돌리기' : '공유 기준으로 적용';
   if (b?.dir === 'out') {
     $('warn').textContent = `이 프로필에서 ${b.remove}개를 지운 것으로 보입니다(공유 기준 ${b.total}개 중). 다른 프로필에도 반영할까요? `

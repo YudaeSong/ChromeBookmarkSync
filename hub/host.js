@@ -33,6 +33,17 @@ function readDiskVersion(manifestPath) {
 }
 
 const isMaster = (config, email) => !!email && String(email).toLowerCase() === String(config.masterEmail || '').toLowerCase();
+const normEmail = (e) => String(e ?? '').trim().toLowerCase();
+
+// config.excludeEmails에 적힌 Google 계정의 프로필은 동기화하지 않는다(받지도 올리지도 않음). 빈 email은 일치시키지 않는다.
+// 메인 프로필은 목록에 있어도 제외하지 않는다(메인이 빠지면 공유 트리를 처음 만들 수 없다).
+function isExcluded(config, email, log) {
+  const e = normEmail(email);
+  if (!e || !Array.isArray(config.excludeEmails)) return false;
+  if (!config.excludeEmails.some((x) => normEmail(x) === e)) return false;
+  if (isMaster(config, email)) { log('config: masterEmail is in excludeEmails, ignored'); return false; }
+  return true;
+}
 
 function clientEntry(req) {
   return {
@@ -61,6 +72,11 @@ async function handleInner(req, ctx) {
   if (req.type !== 'sync' && req.type !== 'init') return { error: 'bad-request' };
   if (typeof req.clientId !== 'string' || !req.clientId) return { error: 'bad-request' };
   if (req.type === 'sync' && req.ops != null && !Array.isArray(req.ops)) return { error: 'bad-request' };
+  // 예외 프로필: 잠금을 잡지 않고 shared.json도 쓰지 않는다(version·clients 그대로). protocol 검사는 그 앞이라 옛 코드 감지는 유지된다.
+  if (isExcluded(config, req.email, log)) {
+    log(`excluded ${req.email}`);
+    return { excluded: true };
+  }
   const master = isMaster(config, req.email);
   const p = storePaths(dataDir);
 
