@@ -5,11 +5,8 @@
   "type": "module",
   "description": "PC 안의 모든 Chrome 프로필 북마크를 실시간으로 맞추는 로컬 허브 + 확장",
   "scripts": {
-    "hub": "node hub/server.js",
     "test": "node --test test/*.test.js",
+    "host:status": "node hub/host.js --status",
     "backup": "node scripts/backup-bookmarks.mjs"
-  },
-  "dependencies": {
-    "ws": "^8.18.0"
   }
 }

@@ -1,8 +1,8 @@
 # WebSocket 허브 → Chrome Native Messaging 전환 설계
 
-상태: **확정 (S1부터 구현)** · 기준 코드: `29d38c1` · 작성 2026-11-27
+상태: **완료 (S1~S4, 확장 2.0.2·PROTOCOL 3)** · 설계 기준 코드: `29d38c1` · 작성 2026-11-27 · 현행화 2026-11-28
 
-상시 실행되는 WebSocket 허브(`hub/server.js`, 예약 작업 `ChromeBookmarkSyncHub`)를 없앤다. 대신 Chrome이 요청할 때만 띄우는 Native Messaging 호스트가 공유 파일을 읽고 쓰고, 각 프로필의 확장이 3-way 비교로 병합한다.
+상시 실행되던 WebSocket 허브(`hub/server.js`, 예약 작업 `ChromeBookmarkSyncHub`)를 없앴다(S4에서 파일과 예약 작업 등록 삭제). 대신 Chrome이 요청할 때만 띄우는 Native Messaging 호스트가 공유 파일을 읽고 쓰고, 각 프로필의 확장이 3-way 비교로 병합한다.
 
 ---
 
@@ -70,9 +70,9 @@
 | `extension/diff.js` | 신규 (S1) | `diffTrees(base, local)` → ops를 만드는 순수 함수다. merge.js와 짝이라서 S1에서 함께 만들고 왕복 테스트를 한다. |
 | `scripts/install-host.ps1` | 신규 (S1) | `hub/native/host.bat`와 `hub/native/com.chromebookmarksync.host.json`을 생성한다. node 절대 경로와 `config.extensionId`를 쓴다. HKCU 등록도 한다. |
 | `hub/tree.js` | **수정 없음** | 검증과 적용 규칙을 그대로 재사용한다. |
-| `extension/core.js` | 재작성 (S2) | 3-way 동기화 엔진이다. reconcile·syncFolder·moveLocal·resolveRoots·대량 삭제 보호는 유지한다. |
+| `extension/core.js` | 재작성 (S2), reconcile 2단계 (S3b) | 3-way 동기화 엔진이다. moveLocal·resolveRoots·대량 삭제 보호는 유지한다. reconcile은 배치→정리 2단계로 바꿨다(§4.2 8단계). |
 | `extension/background.js` | 재작성 (S2) | 네이티브 호출, 포커스·시작·5분 알람·북마크 이벤트 트리거를 맡는다. |
-| `hub/server.js`, `hub/core.js`, `scripts/install-autostart.ps1` | 삭제 (S4) | WebSocket 허브 |
+| `hub/server.js`, `hub/core.js`, `scripts/install-autostart.ps1` | **삭제됨 (S4)** | WebSocket 허브. `ws` 의존성과 `npm run hub`도 지웠고 `npm run host:status`를 추가했다. |
 
 호스트 이름은 `com.chromebookmarksync.host`다. 이 이름은 `scripts/install-host.ps1`과 `extension/shared.js`(`HOST_NAME`) **두 곳에 있으므로 함께 바꿔야 한다**.
 
@@ -89,8 +89,11 @@
 ```json
 { "version": 17, "initialized": true, "roots": { "root_bar": [...], "root_other": [...], "root_mobile": [...] },
   "updatedAt": "…", "updatedBy": "<clientId>",
-  "clients": { "<clientId>": { "email": "…", "version": "2.0.0", "protocol": 3, "at": "…", "result": "ok|blocked|stuck" } } }
+  "clients": { "<clientId>": { "email": "…", "version": "2.0.2", "protocol": 3, "at": "…", "result": "ok|blocked|stuck" } },
+  "confirmed": [ { "version": 18, "gids": ["…"] } ] }
 ```
+
+- `confirmed`: 확인된 대량 삭제(§4.5). push 요청이 `confirmRemove: true`를 실으면, 호스트는 그 요청으로 사라진 gid를 version과 함께 기록하고 최근 `CONFIRMED_KEEP = 5`건만 남긴다.
 
 - `roots`의 형식은 지금 `Tree.dump()`와 같다. 그래서 `state.json`을 그대로 옮길 수 있다.
 - **잠금**: `shared.json.lock`을 `fs.openSync(…, 'wx')`로 만든다(배타 생성). 실패하면 25 ms 간격으로 최대 5초 기다린다. 잠금 파일이 30초보다 오래됐으면 남은 찌꺼기로 보고 지운 뒤 다시 시도한다. 해제는 `finally`에서 한다.
@@ -105,13 +108,18 @@
 
 | 요청 (확장→호스트) | 응답 |
 |---|---|
-| `{type:'sync', clientId, email, protocol, version, baseVersion, ops:[…]}` | `{version, roots?, results:{applied, skipped, rescued}, diskVersion}`. `roots`는 `ops`가 적용됐거나 `version !== baseVersion`일 때만 넣는다. |
+| `{type:'sync', clientId, email, protocol, version, result, baseVersion, ops:[…], confirmRemove?}` | `{version, roots?, confirmed?, results:{applied, unchanged, skipped, rescued}, diskVersion}`. `roots`는 `ops`가 있거나 `version !== baseVersion`일 때만 넣는다. `confirmed`는 `baseVersion` 이후의 항목만 싣는다. |
+| 예외 프로필(`config.excludeEmails`)의 sync·init | `{excluded:true}`만 돌려준다. `shared.json`과 `clients`를 쓰지 않고 host.log에 `excluded <email>`을 남긴다. |
 | (공유가 초기화되지 않았을 때 sync) | 메인이면 `{need:'init'}`, 아니면 `{need:'wait'}`. `masterEmail`은 `hub/config.json`에서 읽는다. |
 | `{type:'init', roots, …}` | 메인 프로필이고 초기화 전이며 `state.json`이 없을 때만 받아들인다. 응답은 `{version, roots}`다. |
 | 공통 오류 | `{error:'protocol', want}`, `{error:'migrate-first'}`, `{error:'too-large'}`, `{error:'lock-timeout'}`, `{error:'bad-request'}` |
 
-- `diskVersion`은 호스트가 디스크의 `extension/manifest.json`에서 읽은 version이다. 확장은 자기 버전이 이보다 낮으면 큐가 빈 뒤 `chrome.runtime.reload()`로 다시 읽는다. 같은 diskVersion에는 한 번만 한다(저장소의 `reloadedFor`로 확인). 지금 허브의 `POST /reload-extensions`를 대신하며, 「Chrome은 디스크 코드를 고쳐도 새로고침 전까지 옛 코드를 돌린다」(shared.js:7, README:51) 문제를 자동으로 푼다.
-- `protocol`이 호스트의 `PROTOCOL`과 다르면 오류로 답한다. 확장은 배지 `!`를 띄우고 팝업에 「확장 새로고침 필요」를 보인다. 이것이 옛 코드 감지(hub/core.js:57-61)를 대신한다.
+- **판정 순서**: protocol 검사 → 형식 검사 → 제외 검사 → 잠금. 제외 검사는 email을 trim·소문자로 비교하고, 빈 email은 일치시키지 않는다. `masterEmail`이 목록에 있으면 무시하고 로그를 남긴다.
+- `diskVersion`은 호스트가 디스크의 `extension/manifest.json`에서 읽은 version이다. 확장은 **`shared.js`의 `CODE_VERSION`**이 이보다 낮으면 큐가 빈 뒤 `chrome.runtime.reload()`로 다시 읽는다. 같은 diskVersion에는 한 번만 한다(저장소의 `reloadedFor`로 확인). 허브의 `POST /reload-extensions`를 대신한다. 「Chrome은 디스크 코드를 고쳐도 새로고침 전까지 옛 코드를 돌린다」 문제를 자동으로 푼다.
+  - `getManifest().version`이 아니라 `CODE_VERSION`과 비교하는 이유가 있다(S3b). Chrome은 닫혀 있던 프로필을 열 때 manifest는 디스크에서 새로 읽고, 서비스 워커는 옛 ScriptCache 코드로 띄운다. Profile 4·6에서 첫 요청부터 새 version이 보고됐지만 캐시는 옛 시각이었다. 그래서 manifest 값으로는 옛 코드를 알아볼 수 없다. 반면 실행 중인 서비스 워커의 `chrome.runtime.reload()`는 새 코드를 정상적으로 받는다(Profile 1·5).
+  - 호스트 보고와 팝업의 version도 `CODE_VERSION`을 쓴다. host.test.js가 `CODE_VERSION === manifest.version`을 지킨다. **버전을 올릴 때는 두 값을 함께 올린다.**
+  - 2.0.1 → 2.0.2 전환 때는 옛 코드가 이 문제를 감지하지 못해 9개 프로필을 수동으로 새로고침했다. 2.0.2부터는 필요 없다.
+- `protocol`이 호스트의 `PROTOCOL`과 다르면 오류로 답한다. 확장은 배지 `!`를 띄우고 팝업에 「확장 새로고침 필요」를 보인다. 이것이 옛 코드 감지(옛 hub/core.js)를 대신한다.
 
 ---
 
@@ -127,7 +135,11 @@
 | `initialized`, `clientId` | v1의 의미 그대로 유지한다. |
 | `mismatch` | `{key, count}`. stuck 판정에 쓴다(§4.5). |
 | `blocked` | 대량 삭제 보호로 멈춘 상태(방향 `in`·`out`과 숫자) |
-| `pending` | v1 잔여 ops다. 첫 v2 동기화 때 한 번 올리고 지운다. |
+| `pending` | v1 잔여 ops다. 첫 sync에서 한 번 올리고 `[]`로 비운다. |
+| `status` | 팝업과 배지용 상태(hostOk, synced, waiting, stuck, blocked, protocolError, excluded, 마지막 오류 등) |
+| `reloadedFor` | 마지막으로 다시 읽기를 한 diskVersion(§3.4) |
+
+예외 프로필이 되면 `enterExcluded()`가 `base`·`baseVersion`=null, `initialized`=false, `pending`=[], `blocked`·`mismatch`=null을 `saveState` 한 번으로 저장한다. `map`과 `clientId`는 유지한다. 그래서 목록에서 빠지면 새 프로필처럼 공유 트리로 덮어쓰지만, 같은 노드는 로컬 ID가 그대로다. 첫 맞춤에서는 들어오는 쪽 보호가 꺼진다(`initialized`=false, 의도). 나가는 쪽 보호 경로에서 받은 응답이 excluded여도 같은 처리를 한다.
 
 `map`, `base`, `baseVersion`, `initialized`는 **한 번의 `store.set`으로 함께** 저장한다. v1의 200 ms 지연 저장(`dirty`)은 map만 쓰고, 기준점과 map이 어긋난 채 저장되지 않게 한다.
 
@@ -140,8 +152,14 @@
 5. 호스트 호출: `sync{baseVersion, ops}`. 시간 제한은 15초다. 실패하면 `hostOk=false`(배지 `OFF`)로 두고 다음 트리거에 다시 한다. 기준점은 바꾸지 않는다.
 6. 응답에 `roots`가 없고 `mismatch`도 없으면 끝낸다(빠른 경로: 포커스만 바뀌고 변경이 없는 경우).
 7. **이벤트 경합 확인**: `localEpoch !== epoch0`이면 reconcile하지 않고 1단계부터 다시 한다(최대 3번). 호스트를 호출하는 동안 생긴 사용자 변경이 reconcile로 지워지지 않게 한다. 이것이 v1 core.js:363 방어를 대신한다. 기준점이 아직 옛것이라 이미 올린 ops가 다시 나가지만, 모든 op가 gid 기준으로 멱등이라 결과가 같다.
-8. `reconcile(roots)`. v1 코드를 그대로 쓰고, **들어오는 대량 삭제 보호**도 그대로다(core.js:331-351).
-9. 기준점 저장: `base = roots`, `baseVersion = version`, `initialized = true`. map과 함께 한 번에 저장한다.
+8. `reconcile(roots)`. **들어오는 대량 삭제 보호**는 v1 그대로다. 응답의 `confirmed` gid는 이 판정에서 뺀다. 본체는 S3b에서 2단계로 바꿨다.
+   - **배치**: `syncFolder`가 공유 순서대로 놓기만 한다. 남는 노드는 지우지 않고 (폴더, pos)를 `plan`에 전위 순서로 쌓는다.
+   - **정리**: `sweepExtras`가 모든 루트의 배치가 끝난 뒤 `plan` 순서대로 각 폴더의 pos 뒤에 남은 노드를 `removeLocal`한다. `getChildren`이 실패한 폴더는 건너뛴다.
+   - 바꾼 이유: 폴더마다 바로 지우면, 옛 부모를 새 부모보다 먼저 지날 때 옮겨진 노드가 지워지고 새로 만들어졌다(로컬 ID 변경). 대량 삭제 보호도 우회됐다.
+   - 받아들인 한계: 종류가 바뀐 폴더(폴더↔북마크) 안에서 뒤쪽으로 옮겨진 노드는 재생성된다.
+   - 실기기: Profile 4에서 북마크바→기타 북마크로 옮긴 뒤 Profile 1의 ID 1454가 유지됐다.
+   - `removeLocal`은 지우기에 성공한 뒤에 대응표를 푼다. `bind`는 같은 짝이면 저장하지 않는다.
+9. 기준점 저장: reconcile에 실패 항목이 없으면 `base = roots`(공유 트리)다. 실패 항목이 있으면 맞춘 직후의 내 트리(그 사이 새로 만든 노드는 뺌)다. 그러지 않으면 다음 diff가 공유 트리를 되돌리는 op를 보낸다. 이어서 `baseVersion = version`, `initialized = true`. map과 함께 한 번에 저장한다.
 10. 검증과 stuck 판정(§4.5).
 
 **멱등성**: 5단계(호스트 쓰기)와 9단계(기준점 저장) 사이에 서비스 워커가 꺼지면, 다음 동기화가 옛 기준점으로 같은 ops를 다시 보낸다. create는 gid가 이미 있으면 변경 없음(tree.js:63), remove는 없으면 변경 없음(tree.js:99), update·move는 같은 값이면 변경 없음이다. 그래서 결과가 같다.
@@ -182,9 +200,14 @@
 | `windows.onFocusChanged(id)`, `id !== WINDOW_ID_NONE` | 300 ms 뒤 `sync()`. 마지막 성공 뒤 2초 안이면 건너뛴다(같은 프로필의 창끼리 전환할 때). |
 | 북마크 이벤트 7종 | `localEpoch++`, 1초 디바운스 뒤 `sync()`. 가져오기 중(`onImportBegan`~`Ended`)에는 미루고, 끝나면 한 번 한다. |
 | `alarms` 'sync' `periodInMinutes: 5` | `sync()`. 놓친 이벤트를 복구하고, 포커스가 오래 머문 창도 갱신한다. |
-| 팝업 「지금 맞추기」 / 「공유 기준으로 적용」 | `sync()` / blocked 해제 또는 강제 reconcile |
+| 팝업 `sync` 「지금 맞추기」 | `sync()` |
+| 팝업 `force` 「공유 기준으로 적용」(나가는 쪽 보호로 멈췄으면 「공유 기준으로 되돌리기」) | 들어오는 쪽: 보호를 끄고 reconcile. 나가는 쪽: 내 변경을 버리고 공유 트리로 되돌림 |
+| 팝업 `push` 「다른 프로필에도 반영」 | 나가는 쪽 보호를 넘겨 ops를 `confirmRemove: true`로 보낸다. |
 
 - 리스너는 모두 **최상위에서 동기로 등록한다**(background.js:43 규칙을 유지).
+- **blocked 동안**에는 focus·alarm·event 트리거를 건너뛴다. startup·수동·가져오기 끝은 다시 판정한다.
+- 5분 알람 'sync'는 없을 때만 만든다. v1의 'tick' 알람은 지운다.
+- 서비스 워커가 잠든 상태에서 창을 열면 startup·focus sync가 1초 안에 2~3번 겹친다. 빠른 경로라 무해하며 알려진 동작이다(S3 관찰).
 - v1의 1분 tick + `ticks % 5`는 쓰지 않는다. WebSocket이 서비스 워커를 깨워 두지 않으면 모듈 변수 `ticks`가 깨어날 때마다 0으로 돌아가서, 5분 점검이 영영 오지 않는다.
 - 북마크 이벤트의 메아리(내 reconcile이 일으킨 이벤트)는 거르지 않는다. 디바운스 뒤 `diffTrees(base, local)`이 빈 결과라 **호스트를 부르지 않고** 끝난다. ops가 비고 트리거가 북마크 이벤트일 때는 호스트를 부르지 않는다.
 
@@ -194,21 +217,27 @@
 |---|---|
 | 들어오는 대량 삭제 보호 | v1 그대로다(`GUARD_MIN = 20`, `GUARD_RATIO = 0.3`, `initialized`일 때만). 멈추면 `blocked = {dir:'in', remove, total, incoming}`로 둔다. |
 | 나가는 대량 삭제 보호 | **신규**. 같은 상수로 판정한다. map이 깨지거나 Google 계정 동기화가 프로필을 갈아엎은 경우, 공유 트리를 거쳐 모든 프로필이 지워지는 것을 막는다(v1에는 없던 경로). 팝업에서 「이 프로필에서 N개를 지운 것으로 보입니다. 다른 프로필에도 반영할까요? / 공유 기준으로 되돌리기」를 고른다. |
+| 확인된 대량 삭제 | 「다른 프로필에도 반영」으로 확정한 삭제는 `shared.json`의 `confirmed`에 남는다(§3.3). 받는 프로필은 그 gid를 들어오는 쪽 보호 판정에서 빼서, 같은 삭제에 프로필마다 다시 멈추지 않는다. 오래 맞추지 않은 프로필에 다른 프로필들의 정상 삭제가 쌓여 들어오는 쪽 보호에 걸리는 것은 의도된 동작이다(사용자 결정). |
+| 예외 프로필 | `config.excludeEmails`(§3.4, §4.1). 배지 `EX`. |
 | stuck (같은 불일치 반복) | 허브에서 **확장으로 옮긴다**. reconcile 뒤 `hashRoots(내 트리)`와 `hashRoots(공유 트리, 못 찾은 루트는 [])`를 비교한다. 다르면 `mismatch {key: 내해시:공유해시, count}`를 올리고, 다음 동기화는 빠른 경로 없이 다시 reconcile한다. 같은 key가 `STUCK_AFTER = 5`번을 넘으면 강제 reconcile을 멈추고 배지 `?`를 띄우며, 호스트의 `clients[clientId].result`에 `stuck`을 기록한다. key가 바뀌거나 일치하면 풀린다. |
 | 모바일 루트 skip | `resolveRoots`(core.js:155-172)를 그대로 쓴다. 찾지 못한 루트는 reconcile과 해시 비교에서 빼고(`[]`로 처리), **diff에서도 그 루트 아래는 비교하지 않는다**. 그렇지 않으면 「공유에는 있는데 내게는 없음」이 삭제로 잘못 잡힌다. |
 | 옛 코드 감지 | §3.4의 protocol 오류와 diskVersion 자동 다시 읽기로 한다. |
 
 ### 4.6 배지와 팝업
 
+우선순위 순서(background.js `badge()`):
+
 | 배지 | 뜻 |
 |---|---|
-| 없음 | 맞춰짐 |
-| `…` | 맞추는 중, 또는 메인의 첫 동기화를 기다림 |
+| `!` 빨강 | protocol 불일치(확장 새로고침 필요) |
+| `EX` 회색 #9aa0a6 | 동기화 예외 |
+| `!` 빨강 | 대량 삭제 보호로 멈춤(blocked, 들어오는 쪽 또는 나가는 쪽) |
 | `OFF` | 호스트 호출 실패. 등록이 안 됐거나(「Specified native messaging host not found」) 호스트 오류다. |
-| `!` | 확인 필요: 대량 삭제 보호(들어오는 쪽 또는 나가는 쪽), 또는 protocol 불일치 |
 | `?` | stuck |
+| `…` | 기다리는 중이거나 아직 맞추지 못함 |
+| 없음 | 맞춰짐 |
 
-팝업의 「다시 연결」은 없애고, 「지금 맞추기」(v1의 「점검」)와 「공유 기준으로 적용」을 둔다.
+팝업의 「다시 연결」은 없앴다. 명령은 `sync` 「지금 맞추기」, `force` 「공유 기준으로 적용」(나가는 쪽 보호로 멈췄으면 「공유 기준으로 되돌리기」), `push` 「다른 프로필에도 반영」 세 가지다(§4.4). 예외 프로필에서는 「지금 맞추기」만 보인다.
 
 ---
 
@@ -229,7 +258,7 @@
 | `GUARD_MIN = 20`, `GUARD_RATIO = 0.3`, `initialized`일 때만 | core.js:13-16, 341-348 | 주석 「모든 프로필(과 각 Google 계정 동기화)까지 지워지는 사고를 막는다」 | 들어오는 대량 삭제 | **유지**. 같은 상수를 나가는 쪽에도 **추가 사용** | README:13 숫자와 연동 |
 | `blocked.info {remove,total,incoming}` | core.js:344 ↔ popup.js:14-15 | 코드 | 팝업 경고 문구 | **변경**: `dir:'in'|'out'` 필드 추가 | 나가는 쪽 보호 추가 |
 | `force()`: 멈춘 스냅샷 적용, 없으면 다시 맞춤 | core.js:492-497 | 주석 | 사용자 확인 뒤 적용 | **유지**(의미 같음). out일 때는 「반영」/「되돌리기」 둘로 나뉜다. | |
-| `syncFolder`/`reconcile` (타입이 바뀌면 다시 생성, 남는 노드 삭제, 항목별 실패 로그) | core.js:306-351 | 코드 | 공유 트리로 정확히 맞추기 | **유지** | |
+| `syncFolder`/`reconcile` (타입이 바뀌면 다시 생성, 남는 노드 삭제, 항목별 실패 로그) | core.js:306-351 | 코드 | 공유 트리로 정확히 맞추기 | **변경(S3b)**: 배치(syncFolder가 (폴더, pos)를 plan에 전위 순서로 쌓음) → 정리(sweepExtras, 모든 루트 배치 뒤 plan 순서로 남는 노드 removeLocal, getChildren 실패 폴더는 건너뜀). 타입이 바뀌면 다시 생성, 항목별 실패 로그는 유지 | §4.2 8단계: 받는 쪽 이동 때 지웠다 다시 만들던 문제 |
 | `moveLocal` +1 규칙 | core.js:294-299 | 주석 (Chrome BookmarkModel::Move) | 같은 폴더 안에서 아래로 옮길 때 한 칸 어긋남 | **유지**. `expect` 호출 한 줄만 제거 | |
 | `updateLocal`: 바뀐 필드만, 폴더 url은 무시 | core.js:284-292 | 주석 | 불필요한 update | **유지**. `expect` 호출만 제거 | |
 | `unmodifiable` 노드 제외 | core.js:175 등 | 코드 | 관리 정책 북마크를 건드리지 않는다. | **유지** | |
@@ -276,7 +305,9 @@
 | (신규) `HOST_NAME = 'com.chromebookmarksync.host'` | shared.js | — | — | 추가 | install-host.ps1과 연동 |
 | `countNodes` | shared.js:24-29 | 코드 | 경고 숫자 | **유지** | |
 
-### 5.4 허브 규칙의 이전 (`hub/core.js`, `hub/server.js` → `hub/host.js`, `hub/store.js`, `hub/merge.js`) — S1 신규, S4 삭제
+### 5.4 허브 규칙의 이전 (`hub/core.js`, `hub/server.js` → `hub/host.js`, `hub/store.js`, `hub/merge.js`) — S1 신규, S4 삭제 완료
+
+S4에서 파일을 지우기 전에, 아래 「이전」 항목이 새 위치에 있는지 다시 확인했다. 확장 `STUCK_AFTER`, host `need:'init'|'wait'`, init 검증 뒤 쓰기, store.js의 tmp→rename·EPERM 재시도·`BACKUP_KEEP`·`LOG_MAX_BYTES`, host origin 검사, `too-large`가 그 대상이다. 남은 참조는 `state.json` 경로뿐이다(`--import-state`·`--export-state`·`migrate-first`). 이것은 남긴다.
 
 | 기존 규칙 | 위치 | 출처 | 지금 무엇을 막나 | 이번 수정 후 | 근거 |
 |---|---|---|---|---|---|
@@ -297,7 +328,7 @@
 | `POST /reload-extensions`, `reload-all` | server.js:61-65, hub/core.js:109-112 | 주석 | 고친 확장 코드 일괄 다시 읽기 | **변경**: diskVersion 자동 다시 읽기(§3.4) | |
 | `maxPayload` 64 MB | server.js:76 | 코드 | 큰 init | **변경**: Chrome 한도(확장→호스트 64 MiB, 호스트→확장 1 MB). 호스트가 too-large를 확인 | |
 | 「old extension code …」 로그 | hub/core.js:61 | 코드 | | **변경**: protocol 불일치 오류 응답과 host.log | |
-| `masterEmail`, `extensionId` 설정 | config.example.json | 코드 | | **유지**. `port`는 S4에서 삭제 | |
+| `masterEmail`, `extensionId` 설정 | config.example.json | 코드 | | **유지**. `port`는 S4에서 삭제했고 `excludeEmails: []`를 추가했다. | |
 
 ### 5.5 스크립트·문서 — S1/S4
 
@@ -305,9 +336,10 @@
 |---|---|---|---|---|---|
 | 「첫 동기화 전에 반드시 백업」 | backup-bookmarks.mjs:2 | 주석 | 덮어쓰기 사고 | **유지**, 대상 파일에 `AccountBookmarks`, `AccountBookmarks.bak` **추가**(S1) | §2: Profile 11~15가 백업되지 않던 빈틈 |
 | 백업 경로 ↔ real-data 테스트 입력 | backup-bookmarks.mjs:8 ↔ real-data.test.js:11-13 | 코드 | | **유지**. real-data는 `Profile 1/Bookmarks`만 읽으므로 영향 없음 | |
-| 예약 작업 `ChromeBookmarkSyncHub`(S4U, 창 없음, 재시작 999) | install-autostart.ps1 | 주석 | 로그온 시 허브 자동 실행 | **제거 ★R10**(S4, S3에서는 사용 안 함으로만 둠) | D-4 |
-| README 설치·배지·알아둘 점·복원·제거·코드 수정 뒤 절차 | README 전체 | 문서 | | **변경**(S4 전면 개정): 「먼저 도착한 쪽이 기준」 → 「나중에 맞춘 쪽」, 「즉시 반영」 → 「창 전환 때」, 복원 절차의 허브 → 공유 파일 | |
-| `ws` 의존성, `npm run hub` | package.json | 코드 | | **제거**(S4), `npm run host:status` 추가 | |
+| 예약 작업 `ChromeBookmarkSyncHub`(S4U, 창 없음, 재시작 999) | install-autostart.ps1 | 주석 | 로그온 시 허브 자동 실행 | **제거 ★R10**(S4에서 등록 해제와 파일 삭제 완료) | D-4 |
+| README 설치·배지·알아둘 점·복원·제거·코드 수정 뒤 절차 | README 전체 | 문서 | | **변경**(S4 전면 개정 완료): 「먼저 도착한 쪽이 기준」 → 「나중에 맞춘 쪽」, 「즉시 반영」 → 「창 전환 때」, 복원 절차의 허브 → 공유 파일 | |
+| 공유 백업 되돌리기 | README 「복원」 | 문서(S4 신규) | 백업의 옛 version을 그대로 쓰면, 다시 올라가는 version 번호가 프로필이 받아 둔 옛 기준점 번호와 겹쳐 빠른 경로로 복원을 놓치는 것 | 백업을 **지금 version + 1**로 씌우는 명령을 README에 둔다. | host.js 빠른 경로(`req.baseVersion !== next.version`일 때만 roots) |
+| `ws` 의존성, `npm run hub` | package.json | 코드 | | **제거**(S4 완료), `npm run host:status` 추가 | |
 
 ### 5.6 테스트 계약 (11개) — S2
 
@@ -327,6 +359,11 @@
 신규 테스트:
 - S1 `test/host.test.js`: 실제 `node hub/host.js`를 spawn해서 프레이밍과 origin 거부를 확인한다. 프로세스 여러 개로 동시에 쓰기(잠금, 버전 단조 증가, 유실 없음), too-large, migrate-first, `--import-state` 거부, diff↔merge 왕복(§4.3 표의 모든 행)도 확인한다.
 - S2: 추가와 삭제 구분(A가 X를 지우고, 동기화 안 된 B가 sync해도 X는 지워진 상태 유지), 지워진 폴더에 만든 노드 구조, 나가는 대량 삭제 보호, 호스트 쓰기 뒤 기준점 저장 전에 중단돼도 멱등, 호스트 호출 중 사용자 편집 보존(epoch), **v1 저장소(map + pending, base 없음)에서 옮길 때 로컬 ID가 하나도 바뀌지 않음**(D-4), 루트를 찾지 못한 skip 경로(지금은 테스트가 없다는 조사 결과 → fake-bookmarks에 `bm.get('3')` 실패 옵션 추가).
+- S3b 이동 ID 보존(sync.test.js 「이동 ID 보존」 7건): 루트 사이, 같은 루트의 폴더 사이, 하위가 있는 폴더, 꺼낸 뒤 폴더 삭제, 33개 폴더 이동, 적용 실패 뒤 복구, 모바일 루트 없음. 받는 프로필의 로컬 ID가 바뀌지 않아야 한다.
+- S3b 예외 프로필: host.test.js 4건(대소문자·공백 차이도 일치하면 excluded이고 shared의 version·clients 불변 / 빈 email 불일치 / masterEmail은 무시 / protocol 오류가 제외보다 먼저), sync.test.js (a)~(g)(남의 변경을 받지 않음 / 내 변경을 올리지 않고 이벤트로 호스트를 부르지 않음 / 복귀하면 덮어쓰고 ID 유지 / 복귀할 때 대량 삭제 보호에 걸리지 않음 / v1 저장소의 pending은 올리지 않고 지움 / 나가는 쪽 보호 경로의 excluded 응답).
+- S3b 코드 버전: host.test.js 「`CODE_VERSION`은 manifest.json의 version과 같다」.
+
+현재 테스트는 **59개**다(sync 30, host 28, real-data 1). S4는 테스트를 지우지 않았다(지운 `hub/core.js`·`hub/server.js`를 import하는 테스트가 없었다).
 
 ### 5.7 「제거」 항목 — 별도 승인 필요
 
@@ -363,22 +400,32 @@
 
 공존 기간은 두지 않는다. 2단계에서 허브를 먼저 멈추므로 허브와 호스트가 동시에 쓰는 일이 없다. 아직 새로고침하지 않은 v1 프로필의 변경은 pending으로 보존되고, v2로 다시 읽을 때 올라간다(§4.1).
 
+### 6.1 전환 결과 (S3, 2026-11-28)
+
+- 백업: `backups/2026-11-28T03-34-17/`
+- import 노드는 **229개**다(§2의 228은 D1 조사 때 값). 11개 프로필 모두 protocol 3, result ok였다. 기존 프로필의 첫 sync는 모두 ops 0이었다(다시 덮어쓰지 않음).
+- v1 시절의 어긋남이 정리됐다. Profile 6·8·11~15에 중복으로 있던 `개발/영상생성/127.0.0.1`(:8787)은 공유 트리의 `소스/무료음악검색`으로 맞춰졌다. 공유 트리에만 있던 `Play Console`은 그 프로필들도 따라 받았다.
+- 확장 「오류」 버튼에 v1 코드가 남긴 `WebSocket … ERR_CONNECTION_REFUSED`가 새로고침 뒤에도 남는다. 「모두 삭제」로 지운다(README 문제 해결).
+- 7단계의 되돌리기 경로는 S4에서 예약 작업 등록과 `install-autostart.ps1`을 지웠으므로, 쓰려면 git 기록에서 그 파일을 꺼내 다시 등록해야 한다. `--export-state`는 남아 있다.
+
 ---
 
 ## 7. 확정 대기
 
-| 항목 | 확인하면 확정되는 것 | 시점 |
-|---|---|---|
-| Chrome 158에서 `onFocusChanged`가 다른 프로필로 전환할 때 잃는 쪽에 `WINDOW_ID_NONE`만 보내는지 | 실기기 1회 관찰. 잃는 쪽에 다른 값이 와도 빠른 경로 sync 1회가 더 생길 뿐이라 설계는 바뀌지 않는다. | S3 6단계 |
-| Chrome 158에서도 빈 모바일 폴더가 getTree에 숨겨지는지 | 실기기 관찰. 숨겨지지 않아도 기존 코드가 그대로 동작한다. | S3 6단계 |
-| 압축해제 확장에 `nativeMessaging` 권한을 추가하고 새로고침할 때 확인 창 없이 부여되는지 | 실기기 1개 프로필에서 먼저 시험 | S3 5단계 첫 프로필 |
-| 호스트 1회 호출 지연(cmd + node 시작) | 실측. 300 ms를 넘으면 포커스 디바운스를 조정 | S1 검증 |
+모두 S1·S3에서 확정됐다. 남은 항목은 없다.
+
+| 항목 | 결과 |
+|---|---|
+| Chrome 158 `onFocusChanged`에서 잃는 쪽 | `WINDOW_ID_NONE`만 받아서 sync하지 않는다. |
+| Chrome 158의 빈 모바일 폴더 | 157과 같이 숨겨진다. 기존 코드(ID로 다시 찾기)가 그대로 동작한다. |
+| `nativeMessaging` 권한 추가 뒤 새로고침 | 확인 창 없이 권한이 붙는다. |
+| 호스트 호출 지연 | 1회 중앙값 130 ms(S1), 창 전환부터 호스트 호출까지 0.3~0.6초(S3). 디바운스 조정은 필요 없다. |
 
 ---
 
 ## 8. 세션 작업표
 
-같은 파일을 두 세션이 고치지 않는다. 예외는 `hub/server.js` 하나다. S2가 import 한 줄을 고치고(HUB_PORT 제거 대응) S4가 파일을 삭제한다. 내용을 두 번 고치는 것이 아니고, S3 전환 전에 PC를 다시 켜도 허브가 계속 떠야 하기 때문이다.
+S1, S2, S3, S3b, S4 모두 완료했다. S3b(받는 쪽 이동 ID 보존, 예외 프로필, 코드 버전 기준 다시 읽기, 2.0.2)는 S3 실사용 중에 나온 문제로 추가한 세션이다. 아래 표는 계획 당시의 작업표다.
 
 | 세션 | 포함 항목 | 선행 조건 | 건드리는 파일 | 검증 방법 | 완료 신호(커밋) |
 |---|---|---|---|---|---|
