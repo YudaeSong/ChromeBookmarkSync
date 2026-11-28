@@ -3,3 +3,4 @@ backups/
 hub/data/
 hub/config.json
 .claude/
+hub/native/

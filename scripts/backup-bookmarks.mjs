@@ -1,4 +1,4 @@
-// 모든 Chrome 프로필의 Bookmarks 파일을 backups/<시각>/<프로필폴더>/ 에 복사한다.
+// 모든 Chrome 프로필의 북마크 파일(Bookmarks, 계정 북마크만 쓰는 프로필의 AccountBookmarks)을 backups/<시각>/<프로필폴더>/ 에 복사한다.
 // 첫 동기화(메인 프로필로 덮어쓰기) 전에 반드시 한 번 실행한다. 복원 방법은 README 참고.
 import fs from 'node:fs';
 import path from 'node:path';
@@ -13,7 +13,7 @@ const info = localState.profile?.info_cache || {};
 const summary = {};
 for (const dir of Object.keys(info)) {
   summary[dir] = { name: info[dir].name, user: info[dir].user_name, files: [] };
-  for (const f of ['Bookmarks', 'Bookmarks.bak']) {
+  for (const f of ['Bookmarks', 'Bookmarks.bak', 'AccountBookmarks', 'AccountBookmarks.bak']) {
     const src = path.join(userData, dir, f);
     if (!fs.existsSync(src)) continue;
     fs.mkdirSync(path.join(out, dir), { recursive: true });
